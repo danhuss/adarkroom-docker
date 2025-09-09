@@ -1,5 +1,4 @@
 var Path = {
-		
 	DEFAULT_BAG_SPACE: 10,
 	_STORES_OFFSET: 0,
 	// Everything not in this list weighs 1
@@ -11,7 +10,8 @@ var Path = {
 		'bullets': 0.1,
 		'energy cell': 0.2,
 		'laser rifle': 5,
-		'bolas': 0.5
+    'plasma rifle': 5,
+		'bolas': 0.5,
 	},
 		
 	name: 'Path',
@@ -32,9 +32,11 @@ var Path = {
 		this.panel = $('<div>').attr('id', "pathPanel")
 			.addClass('location')
 			.appendTo('div#locationSlider');
+
+		this.scroller = $('<div>').attr('id', 'pathScroller').appendTo(this.panel);
 		
 		// Add the outfitting area
-		var outfitting = $('<div>').attr({'id': 'outfitting', 'data-legend': _('supplies:')}).appendTo(this.panel);
+		var outfitting = $('<div>').attr({'id': 'outfitting', 'data-legend': _('supplies:')}).appendTo(this.scroller);
 		$('<div>').attr('id', 'bagspace').appendTo(outfitting);
 		
 		// Add the embark button
@@ -44,7 +46,7 @@ var Path = {
 			click: Path.embark,
 			width: '80px',
 			cooldown: World.DEATH_COOLDOWN
-		}).appendTo(this.panel);
+		}).appendTo(this.scroller);
 		
 		Path.outfit = $SM.get('outfit');
 		
@@ -68,7 +70,9 @@ var Path = {
 	},
 	
 	getCapacity: function() {
-		if($SM.get('stores.convoy', true) > 0) {
+		if($SM.get('stores["cargo drone"]', true) > 0) {
+			return Path.DEFAULT_BAG_SPACE + 100;
+		} else if($SM.get('stores.convoy', true) > 0) {
 			return Path.DEFAULT_BAG_SPACE + 60;
 		} else if($SM.get('stores.wagon', true) > 0) {
 			return Path.DEFAULT_BAG_SPACE + 30;
@@ -99,7 +103,7 @@ var Path = {
 			var needsAppend = false;
 			if(perks.length === 0) {
 				needsAppend = true;
-				perks = $('<div>').attr({'id': 'perks', 'data-legend': _('perks:')});
+				perks = $('<div>').attr({'id': 'perks', 'data-legend': _('perks')});
 			}
 			for(var k in $SM.get('character.perks')) {
 				var id = 'perk_' + k.replace(' ', '-');
@@ -130,7 +134,9 @@ var Path = {
 		
 		// Add the armour row
 		var armour = _("none");
-		if($SM.get('stores["s armour"]', true) > 0)
+    if($SM.get('stores["kinetic armour"]', true) > 0)
+			armour = _("kinetic");
+		else if($SM.get('stores["s armour"]', true) > 0)
 			armour = _("steel");
 		else if($SM.get('stores["i armour"]', true) > 0)
 			armour = _("iron");
@@ -166,11 +172,12 @@ var Path = {
 			'grenade': {type: 'weapon' },
 			'bolas': {type: 'weapon' },
 			'laser rifle': {type: 'weapon' },
-			'energy cell': {type: 'tool', desc: _('use with laser rifle') },
+			'energy cell': {type: 'tool', desc: _('emits a soft red glow') },
 			'bayonet': {type: 'weapon' },
 			'charm': {type: 'tool'},
+			'alien alloy': { type: 'tool' },
 			'medicine': {type: 'tool', desc: _('restores') + ' ' + World.MEDS_HEAL + ' ' + _('hp') }
-		}, Room.Craftables);
+		}, Room.Craftables, Fabricator.Craftables);
 		
 		for(var k in carryable) {
 			var lk = _(k);
@@ -304,6 +311,8 @@ var Path = {
 		Path.setTitle();
 		Path.updateOutfitting();
 		Path.updatePerks(true);
+		
+		AudioEngine.playBackgroundMusic(AudioLibrary.MUSIC_DUSTY_PATH);
 
 		Engine.moveStoresView($('#perks'), transition_diff);
 	},
@@ -319,6 +328,7 @@ var Path = {
 		World.onArrival();
 		$('#outerSlider').animate({left: '-700px'}, 300);
 		Engine.activeModule = World;
+		AudioEngine.playSound(AudioLibrary.EMBARK);
 	},
 	
 	handleStateUpdates: function(e){
@@ -327,35 +337,5 @@ var Path = {
 		} else if(e.category == 'income' && Engine.activeModule == Path){
 			Path.updateOutfitting();
 		}
-	},
-
-	scrollSidebar: function(direction, reset){
-
-		if( typeof reset != "undefined" ){
-			$('#perks').css('top', '0px');
-			$('#storesContainer').css('top', '206px');
-			Path._STORES_OFFSET = 0;
-			return;
-		}
-		
-		var momentum = 10;
-
-		if( direction == 'up' )
-			momentum = momentum * -1;
-
-		if( direction == 'down' && inView( direction, $('#perks') ) ){
-
-			return false;
-
-		}else if( direction == 'up' && inView( direction, $('#storesContainer') ) ){
-
-			return false;
-
-		}
-
-		scrollByX( $('#perks'), momentum );
-		scrollByX( $('#storesContainer'), momentum );
-		Path._STORES_OFFSET += momentum;
-
 	}
 };

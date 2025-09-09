@@ -8,10 +8,19 @@ var Events = {
 	_FIGHT_SPEED: 100,
 	_EAT_COOLDOWN: 5,
 	_MEDS_COOLDOWN: 7,
+	_HYPO_COOLDOWN: 7,
+	_SHIELD_COOLDOWN: 10,
+	_STIM_COOLDOWN: 10,
 	_LEAVE_COOLDOWN: 1,
 	STUN_DURATION: 4000,
+	ENERGISE_MULTIPLIER: 4,
+	EXPLOSION_DURATION: 3000,
+	ENRAGE_DURATION: 4000,
+	MEDITATE_DURATION: 5000,
+	BOOST_DURATION: 3000,
+	BOOST_DAMAGE: 10,
+	DOT_TICK: 1000,
 	BLINK_INTERVAL: false,
-
 	init: function(options) {
 		this.options = $.extend(
 			this.options,
@@ -22,7 +31,8 @@ var Events = {
 		Events.EventPool = [].concat(
 			Events.Global,
 			Events.Room,
-			Events.Outside
+			Events.Outside,
+      Events.Marketing
 		);
 
 		Events.eventStack = [];
@@ -73,6 +83,7 @@ var Events = {
 	startCombat: function(scene) {
 		Engine.event('game event', 'combat');
 		Events.fought = false;
+		Events.won = false;
 		var desc = $('#description', Events.eventPanel());
 
 		$('<div>').text(scene.notification).appendTo(desc);
@@ -133,11 +144,59 @@ var Events = {
 		if((Path.outfit['medicine'] || 0) !== 0) {
 			Events.createUseMedsButton().appendTo(healBtns);
 		}
+		if((Path.outfit['hypo'] || 0) !== 0) {
+			Events.createUseHypoButton().appendTo(healBtns);
+		}
+		if ((Path.outfit['stim'] ?? 0) > 0) {
+			Events.createStimButton().appendTo(healBtns);
+		}
+		if($SM.get('stores["kinetic armour"]', true) > 0) {
+			Events.createShieldButton().appendTo(healBtns);
+		}
 		$('<div>').addClass('clear').appendTo(healBtns);
 		Events.setHeal(healBtns);
+		
+		// Set up the enemy attack timers
+		Events.startEnemyAttacks();
+		Events._specialTimers = (scene.specials ?? []).map(s => Engine.setInterval(
+			() => {
+				const enemy = $('#enemy');
+				const text = s.action(enemy);
+				Events.updateFighterDiv(enemy);
+				if (text) {
+					Events.drawFloatText(text, $('.hp', enemy))
+				}
+			}, 
+			s.delay * 1000
+		));
+	},
 
-		// Set up the enemy attack timer
-		Events._enemyAttackTimer = Engine.setInterval(Events.enemyAttack, scene.attackDelay * 1000);
+	startEnemyAttacks: (delay) => {
+		clearInterval(Events._enemyAttackTimer);
+		const scene = Events.activeEvent().scenes[Events.activeScene];
+		Events._enemyAttackTimer = Engine.setInterval(Events.enemyAttack, (delay ?? scene.attackDelay) * 1000);
+	},
+
+	setStatus: (fighter, status) => {
+		fighter.data('status', status);
+		if (status === 'enraged' && fighter.attr('id') === 'enemy') {
+			Events.startEnemyAttacks(0.5);
+			setTimeout(() => {
+				fighter.data('status', 'none');
+				Events.startEnemyAttacks();
+			}, Events.ENRAGE_DURATION);
+		}
+		if (status === 'meditation') {
+			Events._meditateDmg = 0;
+			setTimeout(() => {
+				fighter.data('status', 'none');
+			}, Events.MEDITATE_DURATION);
+		}
+		if (status === 'boost') {
+			setTimeout(() => {
+				fighter.data('status', 'none');
+			}, Events.BOOST_DURATION);
+		}
 	},
 
 	setPause: function(btn, state){
@@ -261,6 +320,43 @@ var Events = {
 		return btn;
 	},
 
+	createUseHypoButton: function(cooldown) {
+		if (cooldown == null) {
+			cooldown = Events._HYPO_COOLDOWN;
+		}
+
+		var btn = new Button.Button({
+			id: 'hypo',
+			text: _('use hypo'),
+			cooldown: cooldown,
+			click: Events.useHypo,
+			cost: { 'hypo': 1 }
+		});
+
+		if((Path.outfit['hypo'] ?? 0) > 0) {
+			Button.setDisabled(btn, true);
+		}
+
+		return btn;
+	},
+
+	createShieldButton: function() {
+		var btn = new Button.Button({
+			id: 'shld',
+			text: _('shield'),
+			cooldown: Events._SHIELD_COOLDOWN,
+			click: Events.useShield
+		});
+		return btn;
+	},
+
+	createStimButton: () => new Button.Button({
+		id: 'use-stim',
+		text: _('boost'),
+		cooldown: Events._STIM_COOLDOWN,
+		click: Events.useStim
+	}),
+
 	createAttackButton: function(weaponName) {
 		var weapon = World.Weapons[weaponName];
 		var cd = weapon.cooldown;
@@ -270,10 +366,11 @@ var Events = {
 			}
 		}
 		var btn = new Button.Button({
-			id: 'attack_' + weaponName.replace(' ', '-'),
+			id: 'attack_' + weaponName.replace(/ /g, '-'),
 			text: weapon.verb,
 			cooldown: cd,
 			click: Events.useWeapon,
+			boosted: () => $('#wanderer').data('status') === 'boost',
 			cost: weapon.cost
 		});
 		if(typeof weapon.damage == 'number' && weapon.damage > 0) {
@@ -290,15 +387,16 @@ var Events = {
 		return btn;
 	},
 
-	drawFloatText: function(text, parent) {
+	drawFloatText: function(text, parent, cb) {
 		$('<div>').text(text).addClass('damageText').appendTo(parent).animate({
-			'bottom': '50px',
+			'bottom': '70px',
 			'opacity': '0'
 		},
-		300,
+		700,
 		'linear',
 		function() {
 			$(this).remove();
+			cb && cb();
 		});
 	},
 
@@ -309,7 +407,8 @@ var Events = {
 		healBtns = healBtns.children('.button');
 		var canHeal = (World.health < World.getMaxHealth());
 		healBtns.each(function(i){
-			Button.setDisabled($(this), !canHeal);
+			const btn = $(this);
+			Button.setDisabled(btn, !canHeal && btn.attr('id') !== 'shld');
 		});
 		return canHeal;
 	},
@@ -340,15 +439,35 @@ var Events = {
 
 	eatMeat: function(btn) {
 		Events.doHeal('cured meat', World.meatHeal(), btn);
+		AudioEngine.playSound(AudioLibrary.EAT_MEAT);
 	},
 
 	useMeds: function(btn) {
 		Events.doHeal('medicine', World.medsHeal(), btn);
+		AudioEngine.playSound(AudioLibrary.USE_MEDS);
+	},
+
+	useHypo: btn => {
+		Events.doHeal('hypo', World.hypoHeal(), btn);
+		AudioEngine.playSound(AudioLibrary.USE_MEDS);
+	},
+
+	useShield: btn => {
+		const player = $('#wanderer');
+		player.data('status', 'shield');
+		Events.updateFighterDiv(player);
+	},
+
+	useStim: btn => {
+		const player = $('#wanderer');
+		player.data('status', 'boost');
+		Events.dotDamage(player, Events.BOOST_DAMAGE);
+		Events.updateFighterDiv(player);
 	},
 
 	useWeapon: function(btn) {
 		if(Events.activeEvent()) {
-			var weaponName = btn.attr('id').substring(7).replace('-', ' ');
+			var weaponName = btn.attr('id').substring(7).replace(/-/g, ' ');
 			var weapon = World.Weapons[weaponName];
 			if(weapon.type == 'unarmed') {
 				if(!$SM.get('character.punches')) $SM.set('character.punches', 0);
@@ -416,42 +535,155 @@ var Events = {
 					}
 				}
 			}
-
+			
 			var attackFn = weapon.type == 'ranged' ? Events.animateRanged : Events.animateMelee;
+			
+			// play variation audio for weapon type
+			var r = Math.floor(Math.random() * 2) + 1;
+			switch (weapon.type) {
+				case 'unarmed':
+					AudioEngine.playSound(AudioLibrary['WEAPON_UNARMED_' + r]);
+					break;
+				case 'melee':
+					AudioEngine.playSound(AudioLibrary['WEAPON_MELEE_' + r]);
+					break;
+				case 'ranged':
+					AudioEngine.playSound(AudioLibrary['WEAPON_RANGED_' + r]);
+					break;
+			}
+
 			attackFn($('#wanderer'), dmg, function() {
-				if($('#enemy').data('hp') <= 0 && !Events.won) {
+				const enemy = $('#enemy');
+				const enemyHp = enemy.data('hp');
+				const scene = Events.activeEvent().scenes[Events.activeScene];
+				const atHealth = scene.atHealth ?? {};
+				const explosion = scene.explosion;
+
+				for (const [k, action] of Object.entries(atHealth)) {
+					const hpThreshold = Number(k);
+					if (enemyHp <= hpThreshold && enemyHp + dmg > hpThreshold) {
+						action(enemy);
+					}
+				}
+
+				if(enemyHp <= 0 && !Events.won) {
 					// Success!
-					Events.winFight();
+					Events.won = true;
+					if (explosion) {
+						Events.explode(enemy, $('#wanderer'), explosion);
+					}
+					else {
+						Events.winFight();
+					}
 				}
 			});
 		}
 	},
 
-	damage: function(fighter, enemy, dmg) {
+	explode: (enemy, player, dmg) => {
+		Events.clearTimeouts();
+		enemy.addClass('exploding');
+		setTimeout(() => {
+			enemy.removeClass('exploding');
+			$('.label', enemy).text('*');
+			Events.damage(enemy, player, dmg, 'ranged', () => {
+				if (!Events.checkPlayerDeath()) {
+					Events.winFight();
+				}
+			});
+		}, Events.EXPLOSION_DURATION);
+	},
+
+	dotDamage: (target, dmg) => {
+		const hp = Math.max(0, target.data('hp') - dmg);
+		target.data('hp', hp);
+		if(target.attr('id') == 'wanderer') {
+			World.setHp(hp);
+			Events.setHeal();
+			Events.checkPlayerDeath();
+		}
+		else if(hp <= 0 && !Events.won) {
+			Events.won = true;
+			Events.winFight();
+		}
+		Events.updateFighterDiv(target);
+		Events.drawFloatText(`-${dmg}`, $('.hp', target));
+	},
+
+	damage: function(fighter, enemy, dmg, type, cb) {
 		var enemyHp = enemy.data('hp');
+		const maxHp = enemy.data('maxHp');
 		var msg = "";
+		const shielded = enemy.data('status') === 'shield';
+		const energised = fighter.data('status') === 'energised';
+		const venomous = fighter.data('status') === 'venomous';
+		const meditating = enemy.data('status') === 'meditation';
 		if(typeof dmg == 'number') {
 			if(dmg < 0) {
 				msg = _('miss');
 				dmg = 0;
 			} else {
-				msg = '-' + dmg;
-				enemyHp = ((enemyHp - dmg) < 0) ? 0 : (enemyHp - dmg);
-				enemy.data('hp', enemyHp);
-				if(fighter.attr('id') == 'enemy') {
-					World.setHp(enemyHp);
-					Events.setHeal();
+				if (energised) {
+					dmg *= this.ENERGISE_MULTIPLIER;
 				}
+
+				if (meditating) {
+					Events._meditateDmg = (Events._meditateDmg ?? 0) + dmg;
+					msg = dmg;
+				}
+				else {
+					msg = (shielded ? '+' : '-') + dmg;
+					enemyHp = Math.min(maxHp, Math.max(0, enemyHp + (shielded ? dmg : -dmg)));
+					enemy.data('hp', enemyHp);
+					if(fighter.attr('id') == 'enemy') {
+						World.setHp(enemyHp);
+						Events.setHeal();
+					}
+				}
+
+				if (venomous && !shielded) {
+					clearInterval(Events._dotTimer);
+					Events._dotTimer = setInterval(() => {
+						Events.dotDamage(enemy, Math.floor(dmg / 2));
+					}, Events.DOT_TICK);
+				}
+				
+				if (shielded) {
+					// shields break in one hit
+					enemy.data('status', 'none');
+				}
+				
 				Events.updateFighterDiv(enemy);
+
+				// play variation audio for weapon type
+				var r = Math.floor(Math.random() * 2) + 1;
+				switch (type) {
+					case 'unarmed':
+						AudioEngine.playSound(AudioLibrary['WEAPON_UNARMED_' + r]);
+						break;
+					case 'melee':
+						AudioEngine.playSound(AudioLibrary['WEAPON_MELEE_' + r]);
+						break;
+					case 'ranged':
+						AudioEngine.playSound(AudioLibrary['WEAPON_RANGED_' + r]);
+						break;
+				}
 			}
 		} else {
 			if(dmg == 'stun') {
 				msg = _('stunned');
-				enemy.data('stunned', Events.STUN_DURATION);
+				enemy.data('stunned', true);
+				setTimeout(() => enemy.data('stunned', false), Events.STUN_DURATION);
 			}
 		}
 
-		Events.drawFloatText(msg, $('.hp', enemy));
+		if (energised || venomous) {
+			// attack buffs only applies to one hit
+			fighter.data('status', 'none');
+			Events.updateFighterDiv(fighter);
+		}
+
+		Events.drawFloatText(msg, $('.hp', enemy), cb);
 	},
 
 	animateMelee: function(fighter, dmg, callback) {
@@ -468,7 +700,7 @@ var Events = {
 
 		fighter.stop(true, true).animate(start, Events._FIGHT_SPEED, function() {
 
-			Events.damage(fighter, enemy, dmg);
+			Events.damage(fighter, enemy, dmg, 'melee');
 
 			$(this).animate(end, Events._FIGHT_SPEED, callback);
 		});
@@ -489,7 +721,7 @@ var Events = {
 		$('<div>').css(start).addClass('bullet').text('o').appendTo('#description')
 			.animate(end, Events._FIGHT_SPEED * 2, 'linear', function() {
 
-			Events.damage(fighter, enemy, dmg);
+			Events.damage(fighter, enemy, dmg, 'ranged');
 
 			$(this).remove();
 			if(typeof callback == 'function') {
@@ -502,31 +734,47 @@ var Events = {
 		// Events.togglePause($('#pause'),'auto');
 
 		var scene = Events.activeEvent().scenes[Events.activeScene];
+		const enemy = $('#enemy');
+		const stunned = enemy.data('stunned');
+		const meditating = enemy.data('status') === 'meditation';
 
-		if(!$('#enemy').data('stunned')) {
+		if(!stunned && !meditating) {
 			var toHit = scene.hit;
 			toHit *= $SM.hasPerk('evasive') ? 0.8 : 1;
 			var dmg = -1;
-			if(Math.random() <= toHit) {
+			if ((Events._meditateDmg ?? 0) > 0) {
+				dmg = Events._meditateDmg;
+				Events._meditateDmg = 0;
+			}
+			else if(Math.random() <= toHit) {
 				dmg = scene.damage;
 			}
 
 			var attackFn = scene.ranged ? Events.animateRanged : Events.animateMelee;
 
-			attackFn($('#enemy'), dmg, function() {
-					if($('#wanderer').data('hp') <= 0) {
-						// Failure!
-						clearTimeout(Events._enemyAttackTimer);
-						Events.endEvent();
-						World.die();
-					}
-			});
+			attackFn($('#enemy'), dmg, Events.checkPlayerDeath);
 		}
-    },
+	},
+
+	checkPlayerDeath: () => {
+		if($('#wanderer').data('hp') <= 0) {
+			Events.clearTimeouts();
+			Events.endEvent();
+			World.die();
+			return true;
+		}
+		return false;
+	},
+
+	clearTimeouts: () => {
+		clearInterval(Events._enemyAttackTimer);
+		Events._specialTimers.forEach(clearInterval);
+		clearInterval(Events._dotTimer);
+	},
 
 	endFight: function() {
 		Events.fought = true;
-		clearTimeout(Events._enemyAttackTimer);
+		Events.clearTimeouts();
 		Events.removePause($('#pause'), 'end');
 	},
 
@@ -536,6 +784,7 @@ var Events = {
 				return;
 			}
 			Events.endFight();
+			// AudioEngine.playSound(AudioLibrary.WIN_FIGHT);
 			$('#enemy').animate({opacity: 0}, 300, 'linear', function() {
 				Engine.setTimeout(function() {
 					var scene = Events.activeEvent().scenes[Events.activeScene];
@@ -572,6 +821,9 @@ var Events = {
 						if((Path.outfit['medicine'] || 0) !== 0) {
 							Events.createUseMedsButton(0).appendTo(healBtns);
 						}
+						if (Path.outfit['hypo'] ?? 0 > 0) {
+							Events.createUseHypoButton(0).appendTo(healBtns);
+						}
 						$('<div>').addClass('clear').appendTo(healBtns);
 						Events.setHeal(healBtns);
 					}
@@ -590,7 +842,7 @@ var Events = {
 	},
 
 	drawDrop:function(btn) {
-		var name = btn.attr('id').substring(5).replace('-', ' ');
+		var name = btn.attr('id').substring(5).replace(/-/g, ' ');
 		var needsAppend = false;
 		var weight = Path.getWeight(name);
 		var freeSpace = Path.getFreeSpace();
@@ -614,7 +866,7 @@ var Events = {
 						numToDrop = Path.outfit[k];
 					}
 					if(numToDrop > 0) {
-						var dropRow = $('<div>').attr('id', 'drop_' + k.replace(' ', '-'))
+						var dropRow = $('<div>').attr('id', 'drop_' + k.replace(/ /g, '-'))
 							.text(_(k) + ' x' + numToDrop)
 							.data('thing', k)
 							.data('num', numToDrop)
@@ -646,7 +898,7 @@ var Events = {
 	},
 
 	drawLootRow: function(name, num){
-		var id = name.replace(' ', '-');
+		var id = name.replace(/ /g, '-');
 		var lootRow = $('<div>').attr('id','loot_' + id).data('item', name).addClass('lootRow');
 		var take = new Button.Button({
 			id: 'take_' + id,
@@ -757,7 +1009,7 @@ var Events = {
 		var btn = $(this);
 		var target = btn.closest('.button');
 		var thing = btn.data('thing');
-		var id = 'take_' + thing.replace(' ', '-');
+		var id = 'take_' + thing.replace(/ /g, '-');
 		var num = btn.data('num');
 		var lootButtons = $('#lootButtons');
 		Engine.log('dropping ' + num + ' ' + thing);
@@ -777,7 +1029,7 @@ var Events = {
 	},
 
 	getLoot: function(btn, stateSkipButtonSet) {
-		var name = btn.attr('id').substring(5).replace('-', ' ');
+		var name = btn.attr('id').substring(5).replace(/-/g, ' ');
 		if(btn.data('numLeft') > 0) {
 			var skipButtonSet = stateSkipButtonSet || false;
 			var weight = Path.getWeight(name);
@@ -834,13 +1086,21 @@ var Events = {
 	},
 
 	createFighterDiv: function(chara, hp, maxhp) {
-		var fighter = $('<div>').addClass('fighter').text(_(chara)).data('hp', hp).data('maxHp', maxhp).data('refname',chara);
+		var fighter = $('<div>')
+			.addClass('fighter')
+			.data('hp', hp)
+			.data('maxHp', maxhp)
+			.data('refname',chara);
+		$('<div>').addClass('label').text(_(chara)).appendTo(fighter);
 		$('<div>').addClass('hp').text(hp+'/'+maxhp).appendTo(fighter);
 		return fighter;
 	},
 
 	updateFighterDiv: function(fighter) {
 		$('.hp', fighter).text(fighter.data('hp') + '/' + fighter.data('maxHp'));
+		const status = fighter.data('status');
+		const hasStatus = status && status !== 'none';
+		fighter.attr('class', `fighter${hasStatus ? ` ${status}` : ''}`);
 	},
 
 	startStory: function(scene) {
@@ -879,13 +1139,19 @@ var Events = {
 		var btnsList = [];
 		for(var id in scene.buttons) {
 			var info = scene.buttons[id];
-				var b = new Button.Button({
-					id: id,
-					text: info.text,
-					cost: info.cost,
-					click: Events.buttonClick,
-					cooldown: info.cooldown
-				}).appendTo(btns);
+			const cost = {
+				...info.cost
+			};
+			if (Path.outfit && Path.outfit['glowstone']) {
+				delete cost.torch;
+			}
+			var b = new Button.Button({
+				id,
+				text: info.text,
+				cost,
+				click: Events.buttonClick,
+				cooldown: info.cooldown
+			}).appendTo(btns);
 			if(typeof info.available == 'function' && !info.available()) {
 				Button.setDisabled(b, true);
 			}
@@ -899,6 +1165,17 @@ var Events = {
 		return (btnsList.length == 1) ? btnsList[0] : false;
 	},
 
+	getQuantity: function(store) {
+		if (store === 'water') {
+			return World.water;
+		}
+		if (store === 'hp') {
+			return World.health;
+		}
+		var num = Engine.activeModule == World ? Path.outfit[store] : $SM.get('stores["'+store+'"]', true);
+		return isNaN(num) || num < 0 ? 0 : num;
+	},
+
 	updateButtons: function() {
 		var btns = Events.activeEvent().scenes[Events.activeScene].buttons;
 		for(var bId in btns) {
@@ -907,11 +1184,16 @@ var Events = {
 			if(typeof b.available == 'function' && !b.available()) {
 				Button.setDisabled(btnEl, true);
 			} else if(b.cost) {
+				const cost = {
+					...b.cost
+				};
+				if (Path.outfit && Path.outfit['glowstone']) {
+					delete cost.torch;
+				}
 				var disabled = false;
-				for(var store in b.cost) {
-					var num = Engine.activeModule == World ? Path.outfit[store] : $SM.get('stores["'+store+'"]', true);
-					if(typeof num != 'number') num = 0;
-					if(num < b.cost[store]) {
+				for(var store in cost) {
+					var num = Events.getQuantity(store);
+					if(num < cost[store]) {
 						// Too expensive
 						disabled = true;
 						break;
@@ -927,14 +1209,27 @@ var Events = {
 		// Cost
 		var costMod = {};
 		if(info.cost) {
-			for(var store in info.cost) {
-				var num = Engine.activeModule == World ? Path.outfit[store] : $SM.get('stores["'+store+'"]', true);
-				if(typeof num != 'number') num = 0;
-				if(num < info.cost[store]) {
+			const cost = {
+				...info.cost
+			};
+			if (Path.outfit && Path.outfit['glowstone']) {
+				delete cost.torch;
+			}
+			for(var store in cost) {
+				var num = Events.getQuantity(store);
+				if(num < cost[store]) {
 					// Too expensive
 					return;
 				}
-				costMod[store] = -info.cost[store];
+				if (store === 'water') {
+					World.setWater(World.water - cost[store]);
+				}
+				else if (store === 'hp') {
+					World.setHp(World.hp - cost[store]);
+				}
+				else {
+					costMod[store] = -cost[store];
+				}
 			}
 			if(Engine.activeModule == World) {
 				for(var k in costMod) {
@@ -961,6 +1256,22 @@ var Events = {
 		// Notification
 		if(info.notification) {
 			Notifications.notify(null, info.notification);
+		}
+
+    info.onClick && info.onClick();
+
+    // Link
+    if (info.link) {
+      Events.endEvent();
+      window.open(info.link);
+			return;
+    }
+
+		// Next Event
+		if (info.nextEvent) {
+			const eventData = Events.Setpieces[info.nextEvent] || Events.Executioner[info.nextEvent];
+			Events.switchEvent(eventData);
+			return;
 		}
 
 		// Next Scene
@@ -1035,6 +1346,20 @@ var Events = {
 
 		var r = Math.floor(Math.random()*(possibleFights.length));
 		Events.startEvent(possibleFights[r]);
+		
+		// play audio only when fight is possible
+		if (possibleFights.length > 0) {
+			if (World.getDistance() > 20) {
+				// Tier 3
+				AudioEngine.playEventMusic(AudioLibrary.ENCOUNTER_TIER_3);
+			} else if (World.getDistance() > 10) {
+				// Tier 2
+				AudioEngine.playEventMusic(AudioLibrary.ENCOUNTER_TIER_2);
+			} else {
+				// Tier 1
+				AudioEngine.playEventMusic(AudioLibrary.ENCOUNTER_TIER_1);
+			}
+		}
 	},
 
 	activeEvent: function() {
@@ -1048,27 +1373,40 @@ var Events = {
 		return Events.activeEvent().eventPanel;
 	},
 
+	switchEvent: event => {
+		if (!event) {
+			return;
+		}
+		AudioEngine.stopEventMusic();
+		Events.eventPanel().remove();
+		Events.activeEvent().eventPanel = null;
+		Events.eventStack.shift();
+		Events.startEvent(event);
+	},
+
 	startEvent: function(event, options) {
-		if(event) {
-			Engine.event('game event', 'event');
-			Engine.keyLock = true;
-			Engine.tabNavigation = false;
-			Button.saveCooldown = false;
-			Events.eventStack.unshift(event);
-			event.eventPanel = $('<div>').attr('id', 'event').addClass('eventPanel').css('opacity', '0');
-			if(options != null && options.width != null) {
-				Events.eventPanel().css('width', options.width);
-			}
-			$('<div>').addClass('eventTitle').text(Events.activeEvent().title).appendTo(Events.eventPanel());
-			$('<div>').attr('id', 'description').appendTo(Events.eventPanel());
-			$('<div>').attr('id', 'buttons').appendTo(Events.eventPanel());
-			Events.loadScene('start');
-			$('div#wrapper').append(Events.eventPanel());
-			Events.eventPanel().animate({opacity: 1}, Events._PANEL_FADE, 'linear');
-			var currentSceneInformation = Events.activeEvent().scenes[Events.activeScene];
-			if (currentSceneInformation.blink) {
-				Events.blinkTitle();
-			}
+		if(!event) {
+			return;
+		}
+		event.audio && AudioEngine.playEventMusic(event.audio);
+		Engine.event('game event', 'event');
+		Engine.keyLock = true;
+		Engine.tabNavigation = false;
+		Button.saveCooldown = false;
+		Events.eventStack.unshift(event);
+		event.eventPanel = $('<div>').attr('id', 'event').addClass('eventPanel').css('opacity', '0');
+		if(options != null && options.width != null) {
+			Events.eventPanel().css('width', options.width);
+		}
+		$('<div>').addClass('eventTitle').text(Events.activeEvent().title).appendTo(Events.eventPanel());
+		$('<div>').attr('id', 'description').appendTo(Events.eventPanel());
+		$('<div>').attr('id', 'buttons').appendTo(Events.eventPanel());
+		Events.loadScene('start');
+		$('div#wrapper').append(Events.eventPanel());
+		Events.eventPanel().animate({opacity: 1}, Events._PANEL_FADE, 'linear');
+		var currentSceneInformation = Events.activeEvent().scenes[Events.activeScene];
+		if (currentSceneInformation.blink) {
+			Events.blinkTitle();
 		}
 	},
 
@@ -1080,6 +1418,7 @@ var Events = {
 	},
 
 	endEvent: function() {
+		AudioEngine.stopEventMusic();
 		Events.eventPanel().animate({opacity:0}, Events._PANEL_FADE, 'linear', function() {
 			Events.eventPanel().remove();
 			Events.activeEvent().eventPanel = null;
@@ -1114,7 +1453,7 @@ var Events = {
 			if(typeof(state[i]) == 'object'){
 				Events.recallDelay(stateName +'["'+ i +'"]', target[i]);
 			} else {
-				if(typeof target[i] == 'function'){
+				if(target && typeof target[i] == 'function'){
 					target[i]();
 				} else {
 					$SM.remove(stateName);
